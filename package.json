@@ -1,0 +1,26 @@
+{
+  "name": "sentinex-face",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "dev:rtsp": "node server/rtsp-server.mjs",
+    "dev:vision": ".venv/bin/uvicorn sentinex_trace.app:app --app-dir backend --host 0.0.0.0 --port 8890",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --host 0.0.0.0"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
+    "@vitejs/plugin-react": "^6.0.3",
+    "lucide-react": "^1.21.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "^6.0.3",
+    "vite": "^8.1.0"
+  }
+}
