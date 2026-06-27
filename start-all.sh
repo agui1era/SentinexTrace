@@ -1,11 +1,31 @@
 #!/bin/bash
-# SentinexFace: Script de inicio automático
-# Este script mata cualquier proceso anterior y levanta todo desde cero.
+# SentinexFace: Script de inicio automático y setup
+# Este script verifica dependencias, mata procesos anteriores y levanta todo desde cero.
 
 echo "======================================"
-echo "SentinexFace - Iniciando servicios..."
+echo "SentinexFace - Iniciando sistema..."
 echo "======================================"
 
+# 0. Verificar e instalar dependencias (para máquinas nuevas)
+echo "0. Comprobando dependencias (Node y Python)..."
+
+if [ ! -d "node_modules" ]; then
+    echo " -> [Node] Instalando dependencias de Node.js (npm install)..."
+    npm install
+else
+    echo " -> [Node] Dependencias ya instaladas."
+fi
+
+if [ ! -d ".venv" ]; then
+    echo " -> [Python] Creando entorno virtual e instalando librerías..."
+    python3 -m venv .venv
+    .venv/bin/pip install --upgrade pip
+    .venv/bin/pip install -r requirements-vision.txt
+else
+    echo " -> [Python] Entorno virtual ya configurado."
+fi
+
+echo ""
 # 1. Matar procesos anteriores (por puerto)
 echo "1. Limpiando servicios anteriores..."
 
@@ -58,4 +78,4 @@ echo "Backend API : http://localhost:8890"
 echo "RTSP Bridge : http://localhost:8787"
 echo "======================================"
 echo "Puedes cerrar esta terminal, los procesos quedaron en background."
-echo "Si quieres ver los logs, revisa vite.log, vision.log y rtsp.log"
+echo "Nota: Si estás en una máquina nueva, asegúrate de tener instalado MongoDB y corriendo en el puerto 27017."
