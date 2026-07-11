@@ -226,3 +226,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+*.pt
+*debug*.py
+*test*.jpg
+human_yolo_basic.py
