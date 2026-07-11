@@ -7,4 +7,5 @@ export interface Settings {
   sourceMode: 'webcam' | 'rtsp';
   rtspUrl: string;
   cameras: { id: string; url: string }[];
+  rawEnv?: Record<string, string>;
 }

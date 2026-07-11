@@ -158,9 +158,19 @@ class VectorStore:
                 suffix += 1
         return identity_id
 
-    def rename_identity(self, identity_id: str, *, name: str, tag: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def rename_identity(
+        self,
+        identity_id: str,
+        *,
+        name: str,
+        tag: Optional[str] = None,
+        merge_threshold: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
         now = utc_now()
         updated: Optional[Dict[str, Any]] = None
+        merged: List[Dict[str, Any]] = []
+        updated_detections = 0
+        reassigned_detections = 0
         with self._lock:
             for identity in self._db["identities"]:
                 if identity["id"] != identity_id:
@@ -174,17 +184,114 @@ class VectorStore:
                 break
             if updated is None:
                 return None
+            if merge_threshold is not None:
+                merged = self._merge_similar_generic_identities(updated, merge_threshold)
+            affected_identity_ids = {identity_id, *(item["id"] for item in merged)}
+            pattern_id = updated.get("patternId", updated.get("name", ""))
             for detection in self._db["detections"]:
-                if detection.get("identityId") != identity_id:
+                old_identity_id = detection.get("identityId")
+                if old_identity_id not in affected_identity_ids:
                     continue
+                detection["identityId"] = identity_id
                 detection["name"] = name
                 if tag is not None:
                     detection["tag"] = tag
                 detection["generic"] = False
+                detection["patternId"] = pattern_id
+                updated_detections += 1
+                if old_identity_id != identity_id:
+                    reassigned_detections += 1
             self._save()
             self._upsert_chroma_identity(updated)
+            for item in merged:
+                self._delete_chroma_identity(item["id"])
+            self._update_mongo_detections_for_identities(
+                affected_identity_ids,
+                target_identity_id=identity_id,
+                name=name,
+                tag=tag,
+                pattern_id=pattern_id,
+            )
 
-        return self._public_identity(updated)
+        public = self._public_identity(updated)
+        public["mergedIdentities"] = merged
+        public["updatedDetections"] = updated_detections
+        public["reassignedDetections"] = reassigned_detections
+        for item in merged:
+            shutil.rmtree(self.enroll_dir / item["id"], ignore_errors=True)
+        return public
+
+    def _merge_similar_generic_identities(
+        self,
+        target: Dict[str, Any],
+        threshold: float,
+    ) -> List[Dict[str, Any]]:
+        target_vector = np.asarray(target.get("embedding", []), dtype=np.float32)
+        if target_vector.size == 0:
+            return []
+        target_probe = normalize_vector(target_vector)
+        merged_vectors = [target_probe]
+        threshold = max(-1.0, min(1.0, float(threshold)))
+        merged: List[Dict[str, Any]] = []
+        remaining: List[Dict[str, Any]] = []
+
+        for identity in self._db["identities"]:
+            if identity.get("id") == target.get("id"):
+                remaining.append(identity)
+                continue
+            if not bool(identity.get("generic", False)):
+                remaining.append(identity)
+                continue
+            stored = np.asarray(identity.get("embedding", []), dtype=np.float32)
+            if stored.size == 0 or stored.shape != target_probe.shape:
+                remaining.append(identity)
+                continue
+            score = float(np.dot(target_probe, normalize_vector(stored)))
+            if score < threshold:
+                remaining.append(identity)
+                continue
+
+            self._copy_identity_samples(target, identity)
+            merged_vectors.append(normalize_vector(stored))
+            merged.append(
+                {
+                    "id": identity.get("id", ""),
+                    "name": identity.get("name", ""),
+                    "score": score,
+                    "patternId": identity.get("patternId", identity.get("name", "")),
+                }
+            )
+
+        if merged:
+            target["embedding"] = normalize_vector(np.mean(np.stack(merged_vectors, axis=0), axis=0)).astype(float).tolist()
+            target["samples"] = len(target.get("thumbnails", []))
+            target["updatedAt"] = utc_now()
+            self._db["identities"] = remaining
+
+        return merged
+
+    def _copy_identity_samples(self, target: Dict[str, Any], source: Dict[str, Any]) -> None:
+        target_dir = self.enroll_dir / target["id"]
+        target_dir.mkdir(parents=True, exist_ok=True)
+        thumbnails = list(target.get("thumbnails", []))
+        existing = set(thumbnails)
+
+        for media_key in source.get("thumbnails", []):
+            source_path = (self.data_dir / media_key).resolve()
+            if not source_path.exists():
+                continue
+            index = len(thumbnails) + 1
+            target_path = target_dir / f"sample-{index}.jpg"
+            while target_path.exists():
+                index += 1
+                target_path = target_dir / f"sample-{index}.jpg"
+            shutil.copy2(source_path, target_path)
+            copied_key = self.media_key(target_path)
+            if copied_key not in existing:
+                thumbnails.append(copied_key)
+                existing.add(copied_key)
+
+        target["thumbnails"] = thumbnails
 
     def delete_identity(self, identity_id: str) -> bool:
         with self._lock:
@@ -192,8 +299,14 @@ class VectorStore:
             self._db["identities"] = [item for item in self._db["identities"] if item["id"] != identity_id]
             deleted = len(self._db["identities"]) != before
             if deleted:
+                # Cascada: sin las detecciones, el patron reaparece porque la UI los
+                # reconstruye desde las detecciones genericas.
+                self._db["detections"] = [
+                    item for item in self._db["detections"] if item.get("identityId") != identity_id
+                ]
                 self._save()
                 self._delete_chroma_identity(identity_id)
+                self._delete_mongo_detections_for_identity(identity_id)
 
         if deleted:
             shutil.rmtree(self.enroll_dir / identity_id, ignore_errors=True)
@@ -237,7 +350,7 @@ class VectorStore:
             "identityId": identity["id"],
             "name": identity["name"],
             "tag": identity.get("tag", ""),
-            "cameraId": identity.get("cameraId", source if source.startswith("CAM") else ""),
+            "cameraId": source if source.startswith("CAM") else identity.get("cameraId", ""),
             "generic": bool(identity.get("generic", False)),
             "matchStatus": match_status,
             "patternId": identity.get("patternId", identity.get("name", "")),
@@ -260,6 +373,23 @@ class VectorStore:
     def list_detections(self, limit: int = 50) -> List[Dict[str, Any]]:
         with self._lock:
             return list(self._db["detections"][: max(1, min(limit, 500))])
+
+    def detections_between(self, start_date: str, end_date: str) -> List[Dict[str, Any]]:
+        lo = (start_date or "")[:10]
+        hi = (end_date or "")[:10]
+        with self._lock:
+            items = list(self._db["detections"])
+        result: List[Dict[str, Any]] = []
+        for item in items:
+            day = str(item.get("timestamp", ""))[:10]
+            if not day:
+                continue
+            if lo and day < lo:
+                continue
+            if hi and day > hi:
+                continue
+            result.append(item)
+        return result
 
     def delete_detection(self, detection_id: str) -> bool:
         with self._lock:
@@ -356,9 +486,15 @@ class VectorStore:
             self.chroma_dir.mkdir(parents=True, exist_ok=True)
             from chromadb.config import Settings
 
+            telemetry_impl = "sentinex_trace.chroma_telemetry.NoOpTelemetry"
+
             client = chromadb.PersistentClient(
                 path=str(self.chroma_dir),
-                settings=Settings(anonymized_telemetry=False),
+                settings=Settings(
+                    anonymized_telemetry=False,
+                    chroma_product_telemetry_impl=telemetry_impl,
+                    chroma_telemetry_impl=telemetry_impl,
+                ),
             )
             self._chroma = client.get_or_create_collection(
                 name=self.chroma_collection_name,
@@ -478,6 +614,53 @@ class VectorStore:
             self._mongo_error = ""
         except Exception as exc:
             self._mongo_error = f"No se pudo borrar deteccion en Mongo: {exc}"
+
+    def _delete_mongo_detections_for_identity(self, identity_id: str) -> None:
+        if self._mongo_detections is None:
+            return
+        try:
+            self._mongo_detections.delete_many({"identityId": identity_id, "system": "sentinex-face-rtsp"})
+            self._mongo_error = ""
+        except Exception as exc:
+            self._mongo_error = f"No se pudo borrar detecciones en Mongo: {exc}"
+
+    def _update_mongo_detections_for_identity(self, identity_id: str, *, name: str, tag: Optional[str]) -> None:
+        self._update_mongo_detections_for_identities(
+            {identity_id},
+            target_identity_id=identity_id,
+            name=name,
+            tag=tag,
+            pattern_id=None,
+        )
+
+    def _update_mongo_detections_for_identities(
+        self,
+        identity_ids: set[str],
+        *,
+        target_identity_id: str,
+        name: str,
+        tag: Optional[str],
+        pattern_id: Optional[str],
+    ) -> None:
+        if self._mongo_detections is None:
+            return
+        update: Dict[str, Any] = {
+            "identityId": target_identity_id,
+            "name": name,
+            "generic": False,
+        }
+        if tag is not None:
+            update["tag"] = tag
+        if pattern_id is not None:
+            update["patternId"] = pattern_id
+        try:
+            self._mongo_detections.update_many(
+                {"identityId": {"$in": list(identity_ids)}, "system": "sentinex-face-rtsp"},
+                {"$set": update},
+            )
+            self._mongo_error = ""
+        except Exception as exc:
+            self._mongo_error = f"No se pudo actualizar detecciones en Mongo: {exc}"
 
 
 def normalize_vector(vector: np.ndarray) -> np.ndarray:
