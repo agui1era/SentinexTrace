@@ -171,12 +171,7 @@ export default function VisionPanel({ settings }: { settings: Settings }) {
   }, [fetchDetections]);
 
   useEffect(() => {
-    if (view !== 'main') return;
-    const timer = setInterval(() => {
-      setSnapshotToken(Date.now());
-      setSnapshotErrors({});
-    }, 5000);
-    return () => clearInterval(timer);
+    // MJPEG stream now handles live updating
   }, [view]);
 
   useEffect(() => {
@@ -447,8 +442,8 @@ export default function VisionPanel({ settings }: { settings: Settings }) {
                   <div className="camera-thumbnail-frame">
                     {!snapshotErrors[camera.id] ? (
                       <img
-                        src={`/api/vision/${encodeURIComponent(camera.id)}/snapshot?ts=${snapshotToken}`}
-                        alt={`Miniatura ${camera.id}`}
+                        src={`/api/vision/${encodeURIComponent(camera.id)}/stream.mjpg`}
+                        alt={`Stream ${camera.id}`}
                         onError={() => setSnapshotErrors((prev) => ({ ...prev, [camera.id]: true }))}
                       />
                     ) : (
